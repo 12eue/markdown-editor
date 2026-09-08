@@ -1,0 +1,9 @@
+node_modules/
+dist/
+renderer/app.js
+renderer/app.css
+renderer/app.js.map
+renderer/app.css.map
+*.log
+.DS_Store
+Thumbs.db

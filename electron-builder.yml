@@ -1,0 +1,46 @@
+appId: com.markdowneditor.app
+productName: Markdown Editor
+copyright: Copyright © 2026 Markdown Editor
+
+directories:
+  output: dist
+  buildResources: build
+
+files:
+  - main.js
+  - preload.js
+  - renderer/index.html
+  - renderer/app.js
+  - renderer/app.css
+  - package.json
+
+asar: true
+
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch:
+        - x64
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  artifactName: ${productName}-${version}-windows-${arch}.${ext}
+
+mac:
+  icon: build/icon.png
+  category: public.app-category.productivity
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  artifactName: ${productName}-${version}-mac-${arch}.${ext}
+
+dmg:
+  title: ${productName} ${version}

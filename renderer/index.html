@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' file: data: https: http:; font-src 'self' data:"
+    />
+    <title>Markdown Editor</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <div id="app" data-mode="split">
+      <header class="titlebar">
+        <div class="titlebar-left">
+          <button id="sidebar-toggle" class="icon-btn" type="button" title="收起侧边栏">
+            <i data-lucide="panel-left-close"></i>
+          </button>
+          <span class="app-name">Markdown Editor</span>
+        </div>
+        <div class="titlebar-actions">
+          <button id="open-folder" class="btn" type="button">
+            <i data-lucide="folder-open"></i><span>文件夹</span>
+          </button>
+          <button id="open-file" class="btn" type="button">
+            <i data-lucide="file-plus-2"></i><span>文件</span>
+          </button>
+          <div id="view-mode" class="segmented" role="tablist" aria-label="视图模式">
+            <button type="button" data-mode="edit" title="仅编辑">
+              <i data-lucide="pen-line"></i>
+            </button>
+            <button type="button" data-mode="split" class="active" title="编辑与预览">
+              <i data-lucide="columns-2"></i>
+            </button>
+            <button type="button" data-mode="preview" title="仅预览">
+              <i data-lucide="eye"></i>
+            </button>
+          </div>
+          <button id="save" class="btn primary" type="button">
+            <i data-lucide="save"></i><span>保存</span>
+          </button>
+          <button id="theme-toggle" class="icon-btn" type="button" title="切换主题">
+            <i data-lucide="moon"></i>
+          </button>
+        </div>
+      </header>
+
+      <div class="workspace">
+        <aside id="sidebar">
+          <div class="sidebar-tabs" role="tablist" aria-label="侧边栏">
+            <button type="button" class="tab active" data-tab="files" role="tab">
+              <i data-lucide="folder-tree"></i><span>文件夹</span>
+            </button>
+            <button type="button" class="tab" data-tab="toc" role="tab">
+              <i data-lucide="list-ordered"></i><span>目录</span>
+            </button>
+          </div>
+          <div class="sidebar-toolbar">
+            <span id="sidebar-title">未打开文件夹</span>
+            <button id="refresh-tree" class="icon-btn small" type="button" title="刷新文件夹">
+              <i data-lucide="refresh-cw"></i>
+            </button>
+          </div>
+          <div id="files-view" class="sidebar-view">
+            <div id="tree-empty" class="empty-state">
+              <i data-lucide="folder-tree"></i>
+              <p>打开文件夹后在此浏览</p>
+            </div>
+            <ul id="file-tree" class="tree hidden"></ul>
+          </div>
+          <div id="toc-view" class="sidebar-view hidden">
+            <div id="toc-list" class="toc-list"></div>
+          </div>
+        </aside>
+
+        <main id="content">
+          <section id="editor-pane" class="pane">
+            <div id="editor" class="editor-host"></div>
+            <div id="editor-empty" class="panel-empty hidden">
+              <i data-lucide="file-text"></i>
+              <p>打开一个 Markdown 文件</p>
+            </div>
+          </section>
+          <section id="preview-pane" class="pane">
+            <div id="preview" class="markdown-body"></div>
+            <div id="preview-empty" class="panel-empty">
+              <i data-lucide="book-open"></i>
+              <p>预览区域</p>
+            </div>
+          </section>
+        </main>
+      </div>
+
+      <footer id="statusbar">
+        <span id="status-file" class="status-file">未打开文件</span>
+        <span class="status-spacer"></span>
+        <span id="status-meta"></span>
+        <span id="status-state" class="status-state"></span>
+        <span class="status-encoding">UTF-8</span>
+      </footer>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
