@@ -215,9 +215,9 @@ function buildMenu() {
 
 async function createWindow() {
   mainWindow = new BrowserWindow({
-    width: 1280,
+    width: 1600,
     height: 820,
-    minWidth: 900,
+    minWidth: 1100,
     minHeight: 600,
     title: 'Markdown Editor',
     backgroundColor: '#f4f5f7',
