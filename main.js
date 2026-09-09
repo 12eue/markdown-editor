@@ -62,24 +62,26 @@ function sendToRenderer(channel, ...args) {
 }
 
 function registerIpc() {
-  ipcMain.handle('dialog:open-file', async () => {
+  ipcMain.handle('dialog:open-file', async (_event, defaultPath) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: '打开 Markdown 文件',
-      properties: ['openFile'],
+      defaultPath: defaultPath || undefined,
+      properties: ['openFile', 'multiSelections'],
       filters: [
         { name: 'Markdown 文件', extensions: ['md', 'markdown', 'mdown', 'mkd', 'txt'] },
         { name: '所有文件', extensions: ['*'] },
       ],
     });
-    return result.canceled ? null : result.filePaths[0];
+    return result.canceled ? [] : result.filePaths;
   });
 
-  ipcMain.handle('dialog:open-folder', async () => {
+  ipcMain.handle('dialog:open-folder', async (_event, defaultPath) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: '打开文件夹',
-      properties: ['openDirectory'],
+      defaultPath: defaultPath || undefined,
+      properties: ['openDirectory', 'multiSelections'],
     });
-    return result.canceled ? null : result.filePaths[0];
+    return result.canceled ? [] : result.filePaths;
   });
 
   ipcMain.handle('dialog:save-file', async (_event, { defaultPath, content }) => {
@@ -101,24 +103,17 @@ function registerIpc() {
   ipcMain.handle('fs:open-path', (_event, target) => shell.openPath(target));
   ipcMain.handle('shell:open-external', (_event, url) => shell.openExternal(url));
 
-  ipcMain.handle('fs:resolve-url', (_event, { baseDir, target }) => {
-    let decoded = target;
-    try {
-      decoded = decodeURIComponent(target);
-    } catch {
-      // Keep the original target when decoding fails.
-    }
-    return pathToFileURL(path.resolve(baseDir, decoded)).href;
-  });
-
-  ipcMain.handle('fs:resolve-path', (_event, { baseDir, target }) => {
-    let decoded = target;
-    try {
-      decoded = decodeURIComponent(target);
-    } catch {
-      // Keep the original target when decoding fails.
-    }
-    return path.resolve(baseDir, decoded);
+  ipcMain.handle('fs:resolve-paths', (_event, items) => {
+    return items.map(({ baseDir, target }) => {
+      let decoded = target;
+      try {
+        decoded = decodeURIComponent(target);
+      } catch {
+        // Keep the original target when decoding fails.
+      }
+      const resolvedPath = path.resolve(baseDir, decoded);
+      return { url: pathToFileURL(resolvedPath).href, path: resolvedPath };
+    });
   });
 
   ipcMain.on('window:set-dirty', (_event, dirty) => {
@@ -233,14 +228,18 @@ async function createWindow() {
 
   let smokeFile = '';
   let smokeFolder = '';
+  let smokeFolder2 = '';
   if (isSmoke) {
     const tempDir = await fs.mkdtemp(path.join(app.getPath('temp'), 'md-editor-smoke-'));
     smokeFile = path.join(tempDir, '示例.md');
     smokeFolder = path.join(tempDir, '示例文件夹');
+    smokeFolder2 = path.join(tempDir, '第二文件夹');
     await fs.mkdir(path.join(smokeFolder, '子目录'), { recursive: true });
     await fs.writeFile(path.join(smokeFolder, 'README.md'), '# 文件夹测试\n\n内容。\n', 'utf-8');
     await fs.writeFile(path.join(smokeFolder, '子目录', '笔记.md'), '# 笔记\n', 'utf-8');
     await fs.writeFile(path.join(smokeFolder, '子目录', '数据.json'), '{}\n', 'utf-8');
+    await fs.mkdir(smokeFolder2, { recursive: true });
+    await fs.writeFile(path.join(smokeFolder2, '说明.md'), '# 说明\n', 'utf-8');
     const sample = [
       '# 冒烟测试',
       '',
@@ -260,6 +259,8 @@ async function createWindow() {
       '| --- | --- |',
       '| 文件读取 | 通过 |',
       '',
+      '## 使用 <code>标签</code>',
+      '',
     ].join('\n');
     await fs.writeFile(smokeFile, sample, 'utf-8');
     smokeTimer = setTimeout(() => {
@@ -272,7 +273,7 @@ async function createWindow() {
   pendingFile = null;
 
   await mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'), {
-    query: { smoke: isSmoke ? '1' : '0', file: initialFile, folder: smokeFolder },
+    query: { smoke: isSmoke ? '1' : '0', file: initialFile, folder: smokeFolder, folder2: smokeFolder2 },
   });
 
   mainWindow.once('ready-to-show', () => {

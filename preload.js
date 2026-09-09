@@ -1,8 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('mdEditor', {
-  openFileDialog: () => ipcRenderer.invoke('dialog:open-file'),
-  openFolderDialog: () => ipcRenderer.invoke('dialog:open-folder'),
+  openFileDialog: (defaultPath) => ipcRenderer.invoke('dialog:open-file', defaultPath),
+  openFolderDialog: (defaultPath) => ipcRenderer.invoke('dialog:open-folder', defaultPath),
   saveFileDialog: (defaultPath, content) =>
     ipcRenderer.invoke('dialog:save-file', { defaultPath, content }),
   readText: (filePath) => ipcRenderer.invoke('fs:read-text', filePath),
@@ -11,10 +11,7 @@ contextBridge.exposeInMainWorld('mdEditor', {
   readDir: (dirPath) => ipcRenderer.invoke('fs:read-dir', dirPath),
   openPath: (target) => ipcRenderer.invoke('fs:open-path', target),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
-  resolveUrl: (baseDir, target) =>
-    ipcRenderer.sendSync('fs:resolve-url', { baseDir, target }),
-  resolvePath: (baseDir, target) =>
-    ipcRenderer.sendSync('fs:resolve-path', { baseDir, target }),
+  resolvePaths: (items) => ipcRenderer.invoke('fs:resolve-paths', items),
   setDirty: (dirty) => ipcRenderer.send('window:set-dirty', dirty),
   report: (payload) => ipcRenderer.send('app:report', payload),
   onMenuAction: (callback) => {

@@ -10,6 +10,8 @@ import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
 import {
   createIcons,
+  createElement,
+  X,
   PanelLeftClose,
   PanelLeftOpen,
   FolderOpen,
@@ -51,12 +53,16 @@ const ICONS = {
   File,
   FileText,
   BookOpen,
+  X,
 };
 
 const state = {
+  tabs: [],
+  activeTabIndex: -1,
   currentFile: null,
   currentDir: null,
-  folderRoot: null,
+  folderRoots: [],
+  lastDialogDir: null,
   expanded: new Set(),
   dirty: false,
   sidebarOpen: true,
@@ -66,8 +72,10 @@ const state = {
 };
 
 const tocEntries = [];
-let savedContent = '';
+let switchingTabs = false;
 let previewTimer = null;
+let previewRenderId = 0;
+let tabElements = [];
 
 const appEl = document.getElementById('app');
 const sidebarToggleBtn = document.getElementById('sidebar-toggle');
@@ -83,6 +91,7 @@ const sidebarTitleEl = document.getElementById('sidebar-title');
 const refreshTreeBtn = document.getElementById('refresh-tree');
 const treeEmptyEl = document.getElementById('tree-empty');
 const fileTreeEl = document.getElementById('file-tree');
+const fileTabsEl = document.getElementById('file-tabs');
 const tocListEl = document.getElementById('toc-list');
 const editorHostEl = document.getElementById('editor');
 const editorEmptyEl = document.getElementById('editor-empty');
@@ -93,6 +102,7 @@ const statusMetaEl = document.getElementById('status-meta');
 const statusStateEl = document.getElementById('status-state');
 
 const nodeMap = new Map();
+const folderRootEls = new Map();
 
 const themeCompartment = new Compartment();
 const editor = new EditorView({
@@ -110,7 +120,7 @@ const editor = new EditorView({
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       themeCompartment.of(state.dark ? oneDark : []),
       EditorView.updateListener.of((update) => {
-        if (update.docChanged) onDocChanged();
+        if (update.docChanged && !switchingTabs) onDocChanged();
       }),
     ],
   }),
@@ -138,6 +148,18 @@ marked.use({
 
 function refreshIcons() {
   createIcons({ icons: ICONS, attrs: { 'stroke-width': 1.8 } });
+}
+
+function makeIcon(iconNode, className = '') {
+  const el = createElement(iconNode, { class: className, 'aria-hidden': 'true' });
+  return el;
+}
+
+function replaceButtonIcon(button, iconNode) {
+  const old = button.querySelector('svg, [data-lucide]');
+  const icon = makeIcon(iconNode);
+  if (old) old.replaceWith(icon);
+  else button.prepend(icon);
 }
 
 function baseName(p) {
@@ -193,7 +215,16 @@ function collectHeadings(source) {
 
 function onDocChanged() {
   const text = editor.state.doc.toString();
-  state.dirty = text !== savedContent;
+  const tab = currentTab();
+  if (tab) {
+    const wasDirty = tab.dirty;
+    tab.content = text;
+    tab.dirty = text !== tab.savedContent;
+    state.dirty = tab.dirty;
+    if (tab.dirty !== wasDirty) updateTabDirtyUi(state.activeTabIndex);
+  } else {
+    state.dirty = false;
+  }
   window.mdEditor.setDirty(state.dirty);
   updateDirtyUi();
   schedulePreview();
@@ -207,6 +238,7 @@ function schedulePreview() {
 }
 
 function renderMarkdown(source, baseDir) {
+  previewRenderId += 1;
   const doc = source == null ? editor.state.doc.toString() : source;
   tocEntries.length = 0;
   const html = marked.parse(doc);
@@ -218,24 +250,7 @@ function renderMarkdown(source, baseDir) {
   previewEl.innerHTML = clean;
 
   if (baseDir) {
-    previewEl.querySelectorAll('img[src]').forEach((img) => {
-      const src = img.getAttribute('src') || '';
-      if (/^(https?:|data:|file:)/i.test(src)) return;
-      try {
-        img.setAttribute('src', window.mdEditor.resolveUrl(baseDir, src));
-      } catch {
-        // Keep the original src when resolution fails.
-      }
-    });
-    previewEl.querySelectorAll('a[href]').forEach((anchor) => {
-      const href = anchor.getAttribute('href') || '';
-      if (/^(https?:|mailto:|#|file:)/i.test(href)) return;
-      try {
-        anchor.dataset.file = window.mdEditor.resolvePath(baseDir, href);
-      } catch {
-        // Keep the original href when resolution fails.
-      }
-    });
+    resolvePreviewPaths(previewEl, baseDir);
   }
 
   previewEl.querySelectorAll('pre code').forEach((block) => {
@@ -250,6 +265,38 @@ function renderMarkdown(source, baseDir) {
   updatePanels();
 }
 
+async function resolvePreviewPaths(root, baseDir) {
+  const id = ++previewRenderId;
+  const jobs = [];
+  root.querySelectorAll('img[src]').forEach((img) => {
+    const src = img.getAttribute('src') || '';
+    if (!/^(https?:|data:|file:)/i.test(src)) jobs.push({ kind: 'url', el: img, target: src });
+  });
+  root.querySelectorAll('a[href]').forEach((anchor) => {
+    const href = anchor.getAttribute('href') || '';
+    if (!/^(https?:|mailto:|#|file:)/i.test(href)) {
+      jobs.push({ kind: 'path', el: anchor, target: href });
+    }
+  });
+  if (!jobs.length) return;
+  try {
+    const resolved = await window.mdEditor.resolvePaths(
+      jobs.map((job) => ({ baseDir, target: job.target }))
+    );
+    if (id !== previewRenderId || !root.isConnected) return;
+    jobs.forEach((job, index) => {
+      if (job.kind === 'url') job.el.setAttribute('src', resolved[index].url);
+      else job.el.dataset.file = resolved[index].path;
+    });
+  } catch {
+    // Keep the original references when resolution fails.
+  }
+}
+
+function htmlToText(html) {
+  return DOMPurify.sanitize(html, { ALLOWED_TAGS: [], ALLOWED_ATTR: [] });
+}
+
 function renderToc() {
   tocListEl.innerHTML = '';
   if (!tocEntries.length) {
@@ -260,12 +307,13 @@ function renderToc() {
     return;
   }
   for (const entry of tocEntries) {
+    const plain = htmlToText(entry.text);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'toc-item';
     btn.style.setProperty('--level', entry.depth);
-    btn.textContent = entry.text;
-    btn.title = entry.text;
+    btn.textContent = plain;
+    btn.title = plain;
     btn.addEventListener('click', () => {
       requestAnimationFrame(() => scrollToHeading(entry));
     });
@@ -323,32 +371,151 @@ function updateStatus() {
   statusMetaEl.textContent = `${lines} 行 · ${text.length} 字符`;
 }
 
-function setDocument(content, filePath) {
-  savedContent = content;
-  state.currentFile = filePath || null;
-  state.currentDir = filePath ? dirOf(filePath) : null;
-  state.dirty = false;
+function currentTab() {
+  return state.tabs[state.activeTabIndex] || null;
+}
+
+function makeTab(filePath, content) {
+  return {
+    path: filePath,
+    dir: dirOf(filePath),
+    name: baseName(filePath),
+    savedContent: content,
+    content,
+    dirty: false,
+  };
+}
+
+function activateTab(index) {
+  if (index < 0 || index >= state.tabs.length) return;
+  const prev = currentTab();
+  if (prev) {
+    prev.content = editor.state.doc.toString();
+    prev.dirty = prev.content !== prev.savedContent;
+  }
+  state.activeTabIndex = index;
+  const tab = state.tabs[index];
+  state.currentFile = tab.path;
+  state.currentDir = tab.dir;
+  state.dirty = tab.dirty;
+  window.mdEditor.setDirty(state.dirty);
+  switchingTabs = true;
   editor.dispatch({
-    changes: { from: 0, to: editor.state.doc.length, insert: content },
+    changes: { from: 0, to: editor.state.doc.length, insert: tab.content },
   });
-  window.mdEditor.setDirty(false);
+  switchingTabs = false;
   updateDirtyUi();
-  renderMarkdown(content, state.currentDir);
+  renderMarkdown(tab.content, tab.dir);
+  highlightCurrent();
+  renderTabs();
+}
+
+function setActiveTab(index) {
+  if (index === state.activeTabIndex) return;
+  activateTab(index);
+}
+
+function renderTabs() {
+  fileTabsEl.innerHTML = '';
+  tabElements = [];
+  if (!state.tabs.length) {
+    fileTabsEl.classList.add('hidden');
+    return;
+  }
+  fileTabsEl.classList.remove('hidden');
+  state.tabs.forEach((tab, index) => {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'file-tab' + (index === state.activeTabIndex ? ' active' : '');
+    btn.title = tab.path;
+
+    const name = document.createElement('span');
+    name.className = 'tab-name' + (tab.dirty ? ' dirty' : '');
+    name.textContent = tab.name;
+    btn.appendChild(name);
+
+    const close = document.createElement('span');
+    close.className = 'tab-close';
+    close.title = '关闭';
+    close.appendChild(makeIcon(ICONS.X));
+    close.addEventListener('click', (event) => {
+      event.stopPropagation();
+      closeTab(index);
+    });
+    btn.appendChild(close);
+
+    btn.addEventListener('click', () => setActiveTab(index));
+    fileTabsEl.appendChild(btn);
+    tabElements.push(btn);
+  });
+  const active = fileTabsEl.querySelector('.file-tab.active');
+  if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+}
+
+function updateTabDirtyUi(index) {
+  const btn = tabElements[index];
+  const tab = state.tabs[index];
+  if (!btn || !tab) return;
+  btn.classList.toggle('dirty', tab.dirty);
+  btn.querySelector('.tab-name')?.classList.toggle('dirty', tab.dirty);
+}
+
+function closeTab(index) {
+  const tab = state.tabs[index];
+  if (!tab) return;
+  if (tab.dirty && !window.confirm(`关闭前保存对“${tab.name}”的更改？未保存的更改将丢失。`)) {
+    return;
+  }
+  const wasActive = index === state.activeTabIndex;
+  state.tabs.splice(index, 1);
+  if (wasActive) {
+    state.activeTabIndex = -1;
+    state.currentFile = null;
+    state.currentDir = null;
+    state.dirty = false;
+    window.mdEditor.setDirty(false);
+    if (state.tabs.length) {
+      activateTab(Math.min(index, state.tabs.length - 1));
+    } else {
+      switchingTabs = true;
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: '' } });
+      switchingTabs = false;
+      updateDirtyUi();
+      renderMarkdown('', null);
+      renderTabs();
+    }
+  } else {
+    if (index < state.activeTabIndex) state.activeTabIndex -= 1;
+    renderTabs();
+  }
   highlightCurrent();
 }
 
 async function openFileByPath(filePath) {
+  const existingIndex = state.tabs.findIndex((tab) => tab.path === filePath);
+  if (existingIndex !== -1) {
+    setActiveTab(existingIndex);
+    return;
+  }
   try {
     const content = await window.mdEditor.readText(filePath);
-    setDocument(content, filePath);
+    state.lastDialogDir = dirOf(filePath);
+    state.tabs.push(makeTab(filePath, content));
+    activateTab(state.tabs.length - 1);
   } catch (err) {
     toast('无法打开文件：' + err.message, 'error');
   }
 }
 
 async function openFileDialog() {
-  const filePath = await window.mdEditor.openFileDialog();
-  if (filePath) await openFileByPath(filePath);
+  const filePaths = await window.mdEditor.openFileDialog(getDefaultDialogDir());
+  for (const filePath of filePaths || []) {
+    await openFileByPath(filePath);
+  }
+}
+
+function getDefaultDialogDir() {
+  return state.lastDialogDir || state.currentDir || null;
 }
 
 function makeTreeNode(entry, depth) {
@@ -366,13 +533,9 @@ function makeTreeNode(entry, depth) {
   chevron.className = 'chevron';
 
   if (entry.isDirectory) {
-    chevron.innerHTML = '<i data-lucide="chevron-right"></i>';
+    chevron.appendChild(makeIcon(ICONS.ChevronRight));
     row.appendChild(chevron);
-
-    const icon = document.createElement('i');
-    icon.dataset.lucide = 'folder';
-    icon.className = 'type-icon folder';
-    row.appendChild(icon);
+    row.appendChild(makeIcon(ICONS.Folder, 'type-icon folder'));
 
     const name = document.createElement('span');
     name.className = 'name';
@@ -389,11 +552,7 @@ function makeTreeNode(entry, depth) {
 
   chevron.style.visibility = 'hidden';
   row.appendChild(chevron);
-
-  const icon = document.createElement('i');
-  icon.dataset.lucide = entry.isMarkdown ? 'file-text' : 'file';
-  icon.className = 'type-icon';
-  row.appendChild(icon);
+  row.appendChild(makeIcon(entry.isMarkdown ? ICONS.FileText : ICONS.File, 'type-icon'));
 
   const name = document.createElement('span');
   name.className = 'name';
@@ -417,10 +576,10 @@ async function loadChildren(node) {
   if (node.dataset.loaded === 'true') return;
   const entries = await window.mdEditor.readDir(node.dataset.path);
   node.dataset.loaded = 'true';
+  node._entries = entries;
   const ul = node.querySelector(':scope > ul');
   const depth = Number(node.dataset.depth || 0);
   for (const entry of entries) ul.appendChild(makeTreeNode(entry, depth + 1));
-  refreshIcons();
   highlightCurrent();
 }
 
@@ -438,27 +597,45 @@ async function expandNode(node) {
   state.expanded.add(node.dataset.path);
 }
 
-async function loadFolder(rootPath) {
-  state.folderRoot = rootPath;
-  state.expanded.clear();
-  nodeMap.clear();
-  fileTreeEl.innerHTML = '';
-  treeEmptyEl.classList.add('hidden');
-  fileTreeEl.classList.remove('hidden');
-
+async function loadFolder(rootPath, { expand = true } = {}) {
+  if (!state.folderRoots.includes(rootPath)) state.folderRoots.push(rootPath);
+  const wrapper = document.createElement('div');
+  wrapper.className = 'folder-root';
   const rootNode = makeTreeNode(
     { path: rootPath, name: baseName(rootPath) || rootPath, isDirectory: true, isFile: false, isMarkdown: false },
     0
   );
-  fileTreeEl.appendChild(rootNode);
-  await expandNode(rootNode);
+  rootNode.classList.add('folder-root-node');
+  wrapper.appendChild(rootNode);
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'folder-close';
+  closeBtn.title = '关闭文件夹';
+  closeBtn.appendChild(makeIcon(ICONS.X));
+  closeBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    closeFolder(rootPath);
+  });
+  rootNode.querySelector(':scope > .tree-row').appendChild(closeBtn);
+  folderRootEls.set(rootPath, wrapper);
+  fileTreeEl.appendChild(wrapper);
+  if (expand) await expandNode(rootNode);
+  treeEmptyEl.classList.add('hidden');
+  fileTreeEl.classList.remove('hidden');
   updateSidebarTitle();
+  return rootNode;
 }
 
 async function refreshTree() {
-  if (!state.folderRoot) return;
+  if (!state.folderRoots.length) return;
+  const roots = [...state.folderRoots];
   const wanted = new Set(state.expanded);
-  await loadFolder(state.folderRoot);
+  nodeMap.clear();
+  folderRootEls.clear();
+  fileTreeEl.innerHTML = '';
+  for (const rootPath of roots) {
+    await loadFolder(rootPath, { expand: wanted.has(rootPath) });
+  }
   for (const p of wanted) {
     const node = nodeMap.get(p);
     if (node) await expandNode(node);
@@ -466,9 +643,35 @@ async function refreshTree() {
   highlightCurrent();
 }
 
+function closeFolder(rootPath) {
+  const wrapper = folderRootEls.get(rootPath);
+  if (!wrapper) return;
+  wrapper.remove();
+  folderRootEls.delete(rootPath);
+  state.folderRoots = state.folderRoots.filter((p) => p !== rootPath);
+  const sep = rootPath.includes('\\') ? '\\' : '/';
+  const prefix = rootPath.replace(/[\\/]+$/, '') + sep;
+  for (const key of [...nodeMap.keys()]) {
+    if (key === rootPath || key.startsWith(prefix)) nodeMap.delete(key);
+  }
+  for (const key of [...state.expanded]) {
+    if (key === rootPath || key.startsWith(prefix)) state.expanded.delete(key);
+  }
+  if (state.lastDialogDir && (state.lastDialogDir === rootPath || state.lastDialogDir.startsWith(prefix))) {
+    state.lastDialogDir = state.folderRoots[state.folderRoots.length - 1] || state.currentDir || null;
+  }
+  if (!state.folderRoots.length) {
+    fileTreeEl.classList.add('hidden');
+    treeEmptyEl.classList.remove('hidden');
+  }
+  updateSidebarTitle();
+  highlightCurrent();
+}
+
 function updateSidebarTitle() {
-  sidebarTitleEl.textContent = state.folderRoot ? baseName(state.folderRoot) : '未打开文件夹';
-  sidebarTitleEl.title = state.folderRoot || '';
+  const count = state.folderRoots.length;
+  sidebarTitleEl.textContent = count ? `${count} 个文件夹` : '未打开文件夹';
+  sidebarTitleEl.title = count ? state.folderRoots.join('\n') : '';
 }
 
 function highlightCurrent() {
@@ -479,31 +682,38 @@ function highlightCurrent() {
 }
 
 async function openFolderDialog() {
-  const folderPath = await window.mdEditor.openFolderDialog();
-  if (!folderPath) return;
-  await loadFolder(folderPath);
-  if (!state.currentFile) {
-    try {
-      const entries = await window.mdEditor.readDir(folderPath);
-      const readme = entries.find(
+  const folderPaths = await window.mdEditor.openFolderDialog(getDefaultDialogDir());
+  for (const folderPath of folderPaths || []) {
+    if (state.folderRoots.includes(folderPath)) {
+      const existing = nodeMap.get(folderPath);
+      if (existing && !existing.classList.contains('expanded')) await toggleDir(existing);
+      state.lastDialogDir = folderPath;
+      continue;
+    }
+    const rootNode = await loadFolder(folderPath);
+    state.lastDialogDir = folderPath;
+    if (!state.tabs.length) {
+      const readme = (rootNode._entries || []).find(
         (entry) => entry.isFile && /^readme\.(md|markdown|mdown|txt)$/i.test(entry.name)
       );
       if (readme) await openFileByPath(readme.path);
-    } catch {
-      // Auto-open is best effort.
     }
   }
 }
 
 async function saveFile() {
-  if (!state.currentFile) return saveFileAs();
+  const tab = currentTab();
+  if (!tab) return saveFileAs();
   const text = editor.state.doc.toString();
   try {
-    await window.mdEditor.writeText(state.currentFile, text);
-    savedContent = text;
+    await window.mdEditor.writeText(tab.path, text);
+    tab.savedContent = text;
+    tab.content = text;
+    tab.dirty = false;
     state.dirty = false;
     window.mdEditor.setDirty(false);
     updateDirtyUi();
+    renderTabs();
   } catch (err) {
     toast('保存失败：' + err.message, 'error');
   }
@@ -511,16 +721,30 @@ async function saveFile() {
 
 async function saveFileAs() {
   const text = editor.state.doc.toString();
-  const defaultPath = state.currentFile ? baseName(state.currentFile) : '未命名.md';
+  const defaultPath = currentTab() ? baseName(currentTab().path) : '未命名.md';
   try {
     const filePath = await window.mdEditor.saveFileDialog(defaultPath, text);
     if (!filePath) return;
-    savedContent = text;
-    state.currentFile = filePath;
-    state.currentDir = dirOf(filePath);
-    state.dirty = false;
+    if (currentTab()) {
+      const tab = currentTab();
+      tab.path = filePath;
+      tab.dir = dirOf(filePath);
+      tab.name = baseName(filePath);
+      tab.savedContent = text;
+      tab.content = text;
+      tab.dirty = false;
+      state.currentFile = filePath;
+      state.currentDir = tab.dir;
+      state.dirty = false;
+      state.lastDialogDir = tab.dir;
+    } else {
+      state.tabs.push(makeTab(filePath, text));
+      state.lastDialogDir = dirOf(filePath);
+      activateTab(state.tabs.length - 1);
+    }
     window.mdEditor.setDirty(false);
     updateDirtyUi();
+    renderTabs();
     highlightCurrent();
   } catch (err) {
     toast('保存失败：' + err.message, 'error');
@@ -531,10 +755,8 @@ function setSidebar(open) {
   state.sidebarOpen = open;
   appEl.classList.toggle('sidebar-collapsed', !open);
   localStorage.setItem('md-sidebar', open ? '1' : '0');
-  const icon = open ? 'panel-left-close' : 'panel-left-open';
-  sidebarToggleBtn.querySelector('i')?.setAttribute('data-lucide', icon);
+  replaceButtonIcon(sidebarToggleBtn, open ? ICONS.PanelLeftClose : ICONS.PanelLeftOpen);
   sidebarToggleBtn.title = open ? '收起侧边栏' : '展开侧边栏';
-  refreshIcons();
 }
 
 function setTab(tab) {
@@ -565,8 +787,7 @@ function setTheme(dark) {
   editor.dispatch({
     effects: themeCompartment.reconfigure(dark ? oneDark : []),
   });
-  themeToggleBtn.querySelector('i')?.setAttribute('data-lucide', dark ? 'sun' : 'moon');
-  refreshIcons();
+  replaceButtonIcon(themeToggleBtn, dark ? ICONS.Sun : ICONS.Moon);
 }
 
 function toast(message, type) {
@@ -660,9 +881,13 @@ async function runSmokeTest(smokeFile) {
     await new Promise((resolve) => setTimeout(resolve, 400));
 
     record(editor.state.doc.toString().includes('# 冒烟测试'));
+    record(getDefaultDialogDir() === dirOf(smokeFile));
     const heading = previewEl.querySelector('h1');
     record(heading && heading.textContent.includes('冒烟测试'));
     record(tocListEl.querySelectorAll('.toc-item').length >= 2);
+    const tocItemsAll = tocListEl.querySelectorAll('.toc-item');
+    const htmlTagItem = tocItemsAll[tocItemsAll.length - 1];
+    record(Boolean(htmlTagItem) && htmlTagItem.textContent.includes('使用 标签'));
 
     setViewMode('edit');
     const tocItems = tocListEl.querySelectorAll('.toc-item');
@@ -680,6 +905,17 @@ async function runSmokeTest(smokeFile) {
     record(back === updated);
 
     if (smokeFolder) {
+      const notePath = pathJoin(smokeFolder, '子目录', '笔记.md');
+      await openFileByPath(notePath);
+      record(state.tabs.length === 2);
+      record(tabElements.length === 2);
+      setActiveTab(0);
+      record(editor.state.doc.toString().includes('# 冒烟测试'));
+      setActiveTab(1);
+      record(editor.state.doc.toString().includes('# 笔记'));
+    }
+
+    if (smokeFolder) {
       await loadFolder(smokeFolder);
       record(fileTreeEl.querySelectorAll('.tree-node').length >= 3);
       const readmeNode = nodeMap.get(pathJoin(smokeFolder, 'README.md'));
@@ -694,15 +930,28 @@ async function runSmokeTest(smokeFile) {
       record(!tocViewEl.classList.contains('hidden'));
     }
 
+    const folder2 = params.get('folder2');
+    if (folder2) {
+      await loadFolder(folder2);
+      record(state.folderRoots.length === 2);
+      record(fileTreeEl.querySelectorAll('.folder-root').length >= 2);
+      const closeBtn = fileTreeEl.querySelector('.folder-root-node > .tree-row .folder-close');
+      record(Boolean(closeBtn));
+      closeFolder(smokeFolder);
+      record(state.folderRoots.length === 1);
+      record(!nodeMap.has(smokeFolder));
+      record(fileTreeEl.querySelectorAll('.folder-root').length === 1);
+    }
+
     window.mdEditor.report(results.every(Boolean) ? 'OK' : 'FAIL ' + JSON.stringify(results));
   } catch (err) {
     window.mdEditor.report('ERR ' + (err && err.message ? err.message : String(err)));
   }
 }
 
-function pathJoin(base, name) {
+function pathJoin(base, ...names) {
   const sep = base.includes('\\') ? '\\' : '/';
-  return base.replace(/[\\/]+$/, '') + sep + name;
+  return names.reduce((acc, name) => acc.replace(/[\\/]+$/, '') + sep + name, base);
 }
 
 async function init() {
