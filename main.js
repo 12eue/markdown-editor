@@ -315,7 +315,7 @@ if (!gotLock) {
   app.quit();
 } else {
   app.on('second-instance', (_event, argv) => {
-    const file = extractFileArg(argv);
+    const file = extractFileArg(argv.slice(1));
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
