@@ -76,6 +76,9 @@ let switchingTabs = false;
 let previewTimer = null;
 let previewRenderId = 0;
 let tabElements = [];
+let scrollSyncBusy = false;
+let scrollSyncTimer = null;
+let lastScrollSource = 'editor';
 
 const appEl = document.getElementById('app');
 const sidebarToggleBtn = document.getElementById('sidebar-toggle');
@@ -105,6 +108,7 @@ const nodeMap = new Map();
 const folderRootEls = new Map();
 
 const themeCompartment = new Compartment();
+const readOnlyCompartment = new Compartment();
 const editor = new EditorView({
   parent: editorHostEl,
   state: EditorState.create({
@@ -119,6 +123,7 @@ const editor = new EditorView({
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
       keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
       themeCompartment.of(state.dark ? oneDark : []),
+      readOnlyCompartment.of(EditorState.readOnly.of(false)),
       EditorView.updateListener.of((update) => {
         if (update.docChanged && !switchingTabs) onDocChanged();
       }),
@@ -170,6 +175,142 @@ function baseName(p) {
 function dirOf(p) {
   const i = Math.max(String(p).lastIndexOf('/'), String(p).lastIndexOf('\\'));
   return i > 0 ? String(p).slice(0, i) : '';
+}
+
+function isMarkdownPath(p) {
+  return /\.(md|markdown|mdown|mkd|txt)$/i.test(String(p));
+}
+
+function normalizeEol(text) {
+  return String(text).replace(/\r\n?/g, '\n');
+}
+
+function detectEol(text) {
+  const match = String(text).match(/\r\n|\r|\n/);
+  return match ? match[0] : '\n';
+}
+
+function textForSave(text, eol) {
+  if (eol === '\r\n') return String(text).replace(/\n/g, '\r\n');
+  if (eol === '\r') return String(text).replace(/\n/g, '\r');
+  return String(text);
+}
+
+function clampScrollTop(el, top) {
+  const max = Math.max(0, el.scrollHeight - el.clientHeight);
+  return Math.max(0, Math.min(top, max));
+}
+
+function getScrollRatio(el) {
+  const max = el.scrollHeight - el.clientHeight;
+  return max > 0 ? el.scrollTop / max : 0;
+}
+
+function currentEditorLine() {
+  try {
+    const block = editor.lineBlockAtHeight(editor.scrollDOM.scrollTop);
+    return editor.state.doc.lineAt(block.from).number;
+  } catch {
+    const lines = editor.state.doc.lines || 1;
+    return Math.max(1, Math.min(lines, Math.round(getScrollRatio(editor.scrollDOM) * lines)));
+  }
+}
+
+function headingEntryBeforeLine(line) {
+  let best = null;
+  for (const entry of tocEntries) {
+    if (entry.line <= line) best = entry;
+    else break;
+  }
+  return best;
+}
+
+function headingEntryAtPreviewTop() {
+  const top = previewEl.scrollTop;
+  let best = null;
+  for (const entry of tocEntries) {
+    const el = document.getElementById(entry.id);
+    if (!el) continue;
+    const elTop = el.getBoundingClientRect().top - previewEl.getBoundingClientRect().top + previewEl.scrollTop;
+    if (elTop <= top + 24) best = entry;
+    else break;
+  }
+  return best;
+}
+
+function withScrollSync(callback) {
+  if (scrollSyncBusy) return;
+  scrollSyncBusy = true;
+  callback();
+  clearTimeout(scrollSyncTimer);
+  scrollSyncTimer = setTimeout(() => {
+    scrollSyncBusy = false;
+  }, 80);
+}
+
+function syncPreviewToEditorLine(line) {
+  const entry = headingEntryBeforeLine(line);
+  if (entry) {
+    const el = document.getElementById(entry.id);
+    if (el) {
+      const top = el.getBoundingClientRect().top - previewEl.getBoundingClientRect().top + previewEl.scrollTop - 12;
+      previewEl.scrollTop = clampScrollTop(previewEl, top);
+      return;
+    }
+  }
+  const lines = editor.state.doc.lines || 1;
+  const ratio = Math.max(0, Math.min(1, (line - 1) / Math.max(1, lines - 1)));
+  previewEl.scrollTop = clampScrollTop(previewEl, ratio * (previewEl.scrollHeight - previewEl.clientHeight));
+}
+
+function syncEditorToPreviewLine(line) {
+  const entry = headingEntryBeforeLine(line);
+  if (entry) {
+    try {
+      const lineObj = editor.state.doc.line(entry.line);
+      editor.dispatch({
+        effects: EditorView.scrollIntoView(lineObj.from, { y: 'start', yMargin: 12 }),
+      });
+      return;
+    } catch {
+      // Fall through to proportional syncing.
+    }
+  }
+  const lines = editor.state.doc.lines || 1;
+  const ratio = Math.max(0, Math.min(1, (line - 1) / Math.max(1, lines - 1)));
+  editor.scrollDOM.scrollTop = ratio * (editor.scrollDOM.scrollHeight - editor.scrollDOM.clientHeight);
+}
+
+function syncPreviewFromEditor() {
+  withScrollSync(() => syncPreviewToEditorLine(currentEditorLine()));
+}
+
+function previewScrollLine() {
+  const entry = headingEntryAtPreviewTop();
+  if (entry) return entry.line;
+  const lines = editor.state.doc.lines || 1;
+  return Math.max(1, Math.round(getScrollRatio(previewEl) * lines) || 1);
+}
+
+function syncEditorFromPreview() {
+  withScrollSync(() => syncEditorToPreviewLine(previewScrollLine()));
+}
+
+function syncPanes(mode) {
+  if (mode === 'preview') syncEditorFromPreview();
+  else syncPreviewFromEditor();
+}
+
+function onEditorScroll() {
+  if (state.viewMode !== 'split' || scrollSyncBusy) return;
+  lastScrollSource = 'editor';
+  withScrollSync(() => syncPreviewToEditorLine(currentEditorLine()));
+}
+
+function onPreviewScroll() {
+  if (state.viewMode !== 'split' || scrollSyncBusy) return;
+  lastScrollSource = 'preview';
+  withScrollSync(() => syncEditorToPreviewLine(previewScrollLine()));
 }
 
 function slugify(text) {
@@ -263,6 +404,7 @@ function renderMarkdown(source, baseDir) {
 
   renderToc();
   updatePanels();
+  requestAnimationFrame(() => syncPanes(state.viewMode));
 }
 
 async function resolvePreviewPaths(root, baseDir) {
@@ -375,14 +517,17 @@ function currentTab() {
   return state.tabs[state.activeTabIndex] || null;
 }
 
-function makeTab(filePath, content) {
+function makeTab(filePath, content, placeholder = false) {
+  const normalized = normalizeEol(content);
   return {
     path: filePath,
     dir: dirOf(filePath),
     name: baseName(filePath),
-    savedContent: content,
-    content,
+    savedContent: normalized,
+    content: normalized,
+    eol: detectEol(content),
     dirty: false,
+    placeholder,
   };
 }
 
@@ -402,6 +547,7 @@ function activateTab(index) {
   switchingTabs = true;
   editor.dispatch({
     changes: { from: 0, to: editor.state.doc.length, insert: tab.content },
+    effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(Boolean(tab.placeholder))),
   });
   switchingTabs = false;
   updateDirtyUi();
@@ -478,7 +624,10 @@ function closeTab(index) {
       activateTab(Math.min(index, state.tabs.length - 1));
     } else {
       switchingTabs = true;
-      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: '' } });
+      editor.dispatch({
+        changes: { from: 0, to: editor.state.doc.length, insert: '' },
+        effects: readOnlyCompartment.reconfigure(EditorState.readOnly.of(false)),
+      });
       switchingTabs = false;
       updateDirtyUi();
       renderMarkdown('', null);
@@ -491,7 +640,22 @@ function closeTab(index) {
   highlightCurrent();
 }
 
+function openPlaceholderFile(filePath) {
+  const existingIndex = state.tabs.findIndex((tab) => tab.path === filePath);
+  if (existingIndex !== -1) {
+    setActiveTab(existingIndex);
+    return;
+  }
+  state.lastDialogDir = dirOf(filePath);
+  state.tabs.push(makeTab(filePath, '', true));
+  activateTab(state.tabs.length - 1);
+}
+
 async function openFileByPath(filePath) {
+  if (!isMarkdownPath(filePath)) {
+    openPlaceholderFile(filePath);
+    return;
+  }
   const existingIndex = state.tabs.findIndex((tab) => tab.path === filePath);
   if (existingIndex !== -1) {
     setActiveTab(existingIndex);
@@ -528,6 +692,10 @@ function makeTreeNode(entry, depth) {
   const row = document.createElement('div');
   row.className = 'tree-row';
   row.style.paddingLeft = `${6 + depth * 15}px`;
+  row.addEventListener('contextmenu', (event) => {
+    event.preventDefault();
+    window.mdEditor.showContextMenu({ target: entry.path, isDirectory: entry.isDirectory });
+  });
 
   const chevron = document.createElement('span');
   chevron.className = 'chevron';
@@ -568,7 +736,10 @@ function makeTreeNode(entry, depth) {
   }
 
   li.appendChild(row);
-  row.addEventListener('click', () => openFileByPath(entry.path));
+  row.addEventListener('click', () => {
+    if (entry.isMarkdown) openFileByPath(entry.path);
+    else openPlaceholderFile(entry.path);
+  });
   return li;
 }
 
@@ -627,7 +798,14 @@ async function loadFolder(rootPath, { expand = true } = {}) {
 }
 
 async function refreshTree() {
-  if (!state.folderRoots.length) return;
+  const tab = currentTab();
+  if (tab && tab.dirty && !window.confirm(`“${tab.name}”有未保存的更改，刷新将丢失这些更改。确定继续吗？`)) {
+    return;
+  }
+  if (!state.folderRoots.length) {
+    await reloadCurrentFile();
+    return;
+  }
   const roots = [...state.folderRoots];
   const wanted = new Set(state.expanded);
   nodeMap.clear();
@@ -641,6 +819,36 @@ async function refreshTree() {
     if (node) await expandNode(node);
   }
   highlightCurrent();
+  await reloadCurrentFile();
+}
+
+async function reloadCurrentFile() {
+  const tab = currentTab();
+  if (!tab) return;
+  try {
+    const content = await window.mdEditor.readText(tab.path);
+    const normalized = normalizeEol(content);
+    tab.savedContent = normalized;
+    tab.content = normalized;
+    tab.eol = detectEol(content);
+    tab.dirty = false;
+    state.dirty = false;
+    state.currentFile = tab.path;
+    state.currentDir = tab.dir;
+    window.mdEditor.setDirty(false);
+    switchingTabs = true;
+    editor.dispatch({
+      changes: { from: 0, to: editor.state.doc.length, insert: normalized },
+    });
+    switchingTabs = false;
+    editor.scrollDOM.scrollTop = 0;
+    renderMarkdown(normalized, tab.dir);
+    updateDirtyUi();
+    renderTabs();
+    toast('已重新加载当前文件');
+  } catch (err) {
+    toast('重新加载失败：' + err.message, 'error');
+  }
 }
 
 function closeFolder(rootPath) {
@@ -704,9 +912,13 @@ async function openFolderDialog() {
 async function saveFile() {
   const tab = currentTab();
   if (!tab) return saveFileAs();
+  if (tab.placeholder) {
+    toast('该文件仅支持预览，不能保存', 'error');
+    return;
+  }
   const text = editor.state.doc.toString();
   try {
-    await window.mdEditor.writeText(tab.path, text);
+    await window.mdEditor.writeText(tab.path, textForSave(text, tab.eol));
     tab.savedContent = text;
     tab.content = text;
     tab.dirty = false;
@@ -723,7 +935,8 @@ async function saveFileAs() {
   const text = editor.state.doc.toString();
   const defaultPath = currentTab() ? baseName(currentTab().path) : '未命名.md';
   try {
-    const filePath = await window.mdEditor.saveFileDialog(defaultPath, text);
+    const output = currentTab() ? textForSave(text, currentTab().eol) : text;
+    const filePath = await window.mdEditor.saveFileDialog(defaultPath, output);
     if (!filePath) return;
     if (currentTab()) {
       const tab = currentTab();
@@ -732,6 +945,7 @@ async function saveFileAs() {
       tab.name = baseName(filePath);
       tab.savedContent = text;
       tab.content = text;
+      tab.eol = detectEol(output);
       tab.dirty = false;
       state.currentFile = filePath;
       state.currentDir = tab.dir;
@@ -771,6 +985,16 @@ function setTab(tab) {
 }
 
 function setViewMode(mode) {
+  const prevMode = state.viewMode;
+  let pendingSync = null;
+  const sourceIsPreview = prevMode === 'preview' || (prevMode === 'split' && lastScrollSource === 'preview');
+  if (sourceIsPreview) {
+    const line = previewScrollLine();
+    pendingSync = () => withScrollSync(() => syncEditorToPreviewLine(line));
+  } else {
+    const line = currentEditorLine();
+    pendingSync = () => withScrollSync(() => syncPreviewToEditorLine(line));
+  }
   state.viewMode = mode;
   appEl.dataset.mode = mode;
   viewModeEl.querySelectorAll('button').forEach((btn) => {
@@ -778,6 +1002,7 @@ function setViewMode(mode) {
   });
   localStorage.setItem('md-mode', mode);
   updatePanels();
+  requestAnimationFrame(pendingSync);
 }
 
 function setTheme(dark) {
@@ -805,6 +1030,8 @@ function bindEvents() {
   saveBtn.addEventListener('click', saveFile);
   themeToggleBtn.addEventListener('click', () => setTheme(!state.dark));
   refreshTreeBtn.addEventListener('click', refreshTree);
+  editor.scrollDOM.addEventListener('scroll', onEditorScroll, { passive: true });
+  previewEl.addEventListener('scroll', onPreviewScroll, { passive: true });
 
   document.querySelectorAll('.sidebar-tabs .tab').forEach((btn) => {
     btn.addEventListener('click', () => setTab(btn.dataset.tab));
@@ -820,11 +1047,8 @@ function bindEvents() {
     const href = anchor.getAttribute('href') || '';
     if (anchor.dataset.file) {
       event.preventDefault();
-      if (/\.(md|markdown|mdown|mkd|txt)$/i.test(anchor.dataset.file)) {
-        openFileByPath(anchor.dataset.file);
-      } else {
-        window.mdEditor.openPath(anchor.dataset.file);
-      }
+      if (isMarkdownPath(anchor.dataset.file)) openFileByPath(anchor.dataset.file);
+      else openPlaceholderFile(anchor.dataset.file);
     } else if (/^(https?:|mailto:)/i.test(href)) {
       event.preventDefault();
       window.mdEditor.openExternal(href);
@@ -889,6 +1113,17 @@ async function runSmokeTest(smokeFile) {
     const htmlTagItem = tocItemsAll[tocItemsAll.length - 1];
     record(Boolean(htmlTagItem) && htmlTagItem.textContent.includes('使用 标签'));
 
+    setViewMode('split');
+    editor.scrollDOM.scrollTop = 120;
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    record(previewEl.scrollTop > 0);
+
+    setViewMode('edit');
+    previewEl.scrollTop = 0;
+    setViewMode('preview');
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    record(previewEl.scrollTop > 0);
+
     setViewMode('edit');
     const tocItems = tocListEl.querySelectorAll('.toc-item');
     if (tocItems.length >= 2) {
@@ -906,12 +1141,16 @@ async function runSmokeTest(smokeFile) {
 
     if (smokeFolder) {
       const notePath = pathJoin(smokeFolder, '子目录', '笔记.md');
+      const crlfPath = pathJoin(smokeFolder, 'crlf.md');
+      await openFileByPath(crlfPath);
+      record(!state.tabs[state.tabs.length - 1].dirty);
       await openFileByPath(notePath);
-      record(state.tabs.length === 2);
-      record(tabElements.length === 2);
+      record(state.tabs.length === 3);
+      record(tabElements.length === 3);
+      record(!state.tabs.find((tab) => tab.path === crlfPath).dirty);
       setActiveTab(0);
       record(editor.state.doc.toString().includes('# 冒烟测试'));
-      setActiveTab(1);
+      setActiveTab(2);
       record(editor.state.doc.toString().includes('# 笔记'));
     }
 
@@ -925,6 +1164,17 @@ async function runSmokeTest(smokeFile) {
       if (subDirNode) {
         await expandNode(subDirNode);
         record(Boolean(nodeMap.get(pathJoin(smokeFolder, '子目录', '笔记.md'))));
+      }
+      const jsonPath = pathJoin(smokeFolder, '子目录', '数据.json');
+      const jsonNode = nodeMap.get(jsonPath);
+      if (jsonNode) {
+        jsonNode.querySelector(':scope > .tree-row').click();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        const placeholderTab = state.tabs[state.tabs.length - 1];
+        record(Boolean(placeholderTab) && placeholderTab.placeholder === true);
+        record(!previewEmptyEl.classList.contains('hidden'));
+      } else {
+        record(false);
       }
       setTab('toc');
       record(!tocViewEl.classList.contains('hidden'));

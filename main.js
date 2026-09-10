@@ -100,7 +100,18 @@ function registerIpc() {
   ipcMain.handle('fs:read-text', (_event, filePath) => readText(filePath));
   ipcMain.handle('fs:write-text', (_event, { path: filePath, content }) => writeText(filePath, content));
   ipcMain.handle('fs:read-dir', (_event, dirPath) => listDir(dirPath));
-  ipcMain.handle('fs:open-path', (_event, target) => shell.openPath(target));
+  ipcMain.handle('context-menu:show', (_event, { target, isDirectory }) => {
+    const menu = Menu.buildFromTemplate([
+      {
+        label: '在资源管理器中打开',
+        click: () => {
+          if (isDirectory) shell.openPath(target);
+          else shell.showItemInFolder(target);
+        },
+      },
+    ]);
+    menu.popup({ window: mainWindow });
+  });
   ipcMain.handle('shell:open-external', (_event, url) => shell.openExternal(url));
 
   ipcMain.handle('fs:resolve-paths', (_event, items) => {
@@ -236,6 +247,7 @@ async function createWindow() {
     smokeFolder2 = path.join(tempDir, '第二文件夹');
     await fs.mkdir(path.join(smokeFolder, '子目录'), { recursive: true });
     await fs.writeFile(path.join(smokeFolder, 'README.md'), '# 文件夹测试\n\n内容。\n', 'utf-8');
+    await fs.writeFile(path.join(smokeFolder, 'crlf.md'), '# CRLF\r\n\r\n换行测试。\r\n', 'utf-8');
     await fs.writeFile(path.join(smokeFolder, '子目录', '笔记.md'), '# 笔记\n', 'utf-8');
     await fs.writeFile(path.join(smokeFolder, '子目录', '数据.json'), '{}\n', 'utf-8');
     await fs.mkdir(smokeFolder2, { recursive: true });

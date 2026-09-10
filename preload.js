@@ -9,7 +9,7 @@ contextBridge.exposeInMainWorld('mdEditor', {
   writeText: (filePath, content) =>
     ipcRenderer.invoke('fs:write-text', { path: filePath, content }),
   readDir: (dirPath) => ipcRenderer.invoke('fs:read-dir', dirPath),
-  openPath: (target) => ipcRenderer.invoke('fs:open-path', target),
+  showContextMenu: (payload) => ipcRenderer.invoke('context-menu:show', payload),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   resolvePaths: (items) => ipcRenderer.invoke('fs:resolve-paths', items),
   setDirty: (dirty) => ipcRenderer.send('window:set-dirty', dirty),
