@@ -604,6 +604,240 @@ button {
   background: var(--surface);
 }
 
+.editor-host .cm-panels {
+  background: var(--surface-2);
+  color: var(--text);
+}
+
+.editor-host .cm-panels-top {
+  border-bottom: 1px solid var(--border);
+}
+
+.search-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+}
+
+.search-panel[data-mode="search"] .replace-row {
+  display: none;
+}
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.search-row-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  color: var(--text-3);
+}
+
+.search-input,
+.replace-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  outline: none;
+}
+
+.search-input::placeholder,
+.replace-input::placeholder {
+  color: var(--text-3);
+}
+
+.search-input:focus,
+.replace-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+
+.search-count {
+  flex: 0 0 auto;
+  min-width: 48px;
+  text-align: center;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.search-count.error {
+  color: var(--danger);
+}
+
+.search-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-2);
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+
+.search-icon-btn:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+
+.search-icon-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.search-btn {
+  flex: 0 0 auto;
+  height: 30px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.search-btn:hover {
+  background: var(--surface-3);
+}
+
+.search-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+
+.search-btn.primary:hover {
+  background: var(--accent-strong);
+}
+
+.search-options {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.search-opt {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.search-opt input {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.search-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+}
+
+.search-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.search-close svg {
+  width: 16px;
+  height: 16px;
+}
+
+.preview-search-panel {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  right: 8px;
+  z-index: 5;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+
+#preview-pane.preview-searching .markdown-body {
+  padding-top: 96px;
+}
+
+#preview-pane.preview-replacing .markdown-body {
+  padding-top: 138px;
+}
+
+.preview-search-match {
+  background: rgba(210, 154, 47, 0.22);
+  outline: 1px solid rgba(210, 154, 47, 0.45);
+  padding: 0 1px;
+  border-radius: 2px;
+}
+
+.preview-search-match.selected {
+  background: rgba(15, 118, 110, 0.28);
+  outline: 1px solid var(--accent);
+}
+
+body.dark .preview-search-match {
+  background: rgba(45, 212, 191, 0.22);
+  outline: 1px solid rgba(45, 212, 191, 0.45);
+}
+
+body.dark .preview-search-match.selected {
+  background: rgba(45, 212, 191, 0.34);
+}
+
+.editor-host .cm-searchMatch {
+  background: rgba(210, 154, 47, 0.22);
+  outline: 1px solid rgba(210, 154, 47, 0.45);
+}
+
+.editor-host .cm-searchMatch.cm-searchMatch-selected {
+  background: rgba(15, 118, 110, 0.28);
+  outline: 1px solid var(--accent);
+}
+
+body.dark .editor-host .cm-searchMatch {
+  background: rgba(45, 212, 191, 0.22);
+  outline: 1px solid rgba(45, 212, 191, 0.45);
+}
+
+body.dark .editor-host .cm-searchMatch.cm-searchMatch-selected {
+  background: rgba(45, 212, 191, 0.34);
+}
+
 #preview-pane {
   background: var(--surface);
 }

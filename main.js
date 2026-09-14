@@ -177,6 +177,19 @@ function buildMenu() {
     {
       label: '编辑',
       submenu: [
+        {
+          label: '查找',
+          accelerator: 'CmdOrCtrl+F',
+          registerAccelerator: !isMac,
+          click: () => sendToRenderer('menu-action', 'find'),
+        },
+        {
+          label: '替换',
+          accelerator: 'CmdOrCtrl+H',
+          registerAccelerator: !isMac,
+          click: () => sendToRenderer('menu-action', 'replace'),
+        },
+        { type: 'separator' },
         { role: 'undo' },
         { role: 'redo' },
         { type: 'separator' },
@@ -272,6 +285,10 @@ async function createWindow() {
       '| 文件读取 | 通过 |',
       '',
       '## 使用 <code>标签</code>',
+      '',
+      '```text',
+      ...Array.from({ length: 60 }, (_, i) => `fill line ${String(i + 1).padStart(2, '0')}`),
+      '```',
       '',
     ].join('\n');
     await fs.writeFile(smokeFile, sample, 'utf-8');

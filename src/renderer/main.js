@@ -1,6 +1,19 @@
 import { EditorView, keymap, lineNumbers, highlightActiveLine, drawSelection } from '@codemirror/view';
 import { EditorState, Compartment } from '@codemirror/state';
 import { defaultKeymap, history, historyKeymap, indentWithTab } from '@codemirror/commands';
+import {
+  search,
+  SearchQuery,
+  setSearchQuery,
+  getSearchQuery,
+  findNext,
+  findPrevious,
+  replaceNext,
+  replaceAll,
+  closeSearchPanel,
+  openSearchPanel,
+  searchPanelOpen,
+} from '@codemirror/search';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { languages } from '@codemirror/language-data';
 import { syntaxHighlighting, defaultHighlightStyle } from '@codemirror/language';
@@ -12,6 +25,14 @@ import {
   createIcons,
   createElement,
   X,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  CaseSensitive,
+  WholeWord,
+  Regex,
+  Replace,
+  ReplaceAll,
   PanelLeftClose,
   PanelLeftOpen,
   FolderOpen,
@@ -54,6 +75,14 @@ const ICONS = {
   FileText,
   BookOpen,
   X,
+  Search,
+  ChevronUp,
+  ChevronDown,
+  CaseSensitive,
+  WholeWord,
+  Regex,
+  Replace,
+  ReplaceAll,
 };
 
 const state = {
@@ -79,6 +108,10 @@ let tabElements = [];
 let scrollSyncBusy = false;
 let scrollSyncTimer = null;
 let lastScrollSource = 'editor';
+let searchPanel = null;
+let searchPanelMode = 'search';
+let searchTarget = 'editor';
+let previewSearchPanel = null;
 
 const appEl = document.getElementById('app');
 const sidebarToggleBtn = document.getElementById('sidebar-toggle');
@@ -99,6 +132,7 @@ const tocListEl = document.getElementById('toc-list');
 const editorHostEl = document.getElementById('editor');
 const editorEmptyEl = document.getElementById('editor-empty');
 const previewEl = document.getElementById('preview');
+const previewPaneEl = document.getElementById('preview-pane');
 const previewEmptyEl = document.getElementById('preview-empty');
 const statusFileEl = document.getElementById('status-file');
 const statusMetaEl = document.getElementById('status-meta');
@@ -121,7 +155,20 @@ const editor = new EditorView({
       EditorView.lineWrapping,
       markdown({ base: markdownLanguage, codeLanguages: languages }),
       syntaxHighlighting(defaultHighlightStyle, { fallback: true }),
-      keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
+      search({
+        top: true,
+        createPanel: (view) => {
+          searchPanel = new SearchReplacePanel(view, searchPanelMode);
+          return searchPanel;
+        },
+      }),
+      keymap.of([
+        { key: 'Ctrl-h', run: openReplacePanelCmd, preventDefault: true, stopPropagation: true },
+        { key: 'Escape', run: closeSearchPanelCmd },
+        ...defaultKeymap,
+        ...historyKeymap,
+        indentWithTab,
+      ]),
       themeCompartment.of(state.dark ? oneDark : []),
       readOnlyCompartment.of(EditorState.readOnly.of(false)),
       EditorView.updateListener.of((update) => {
@@ -401,6 +448,10 @@ function renderMarkdown(source, baseDir) {
       // Highlighting is best effort.
     }
   });
+
+  if (previewSearchPanel && previewSearchPanel.isOpen()) {
+    previewSearchPanel.refresh();
+  }
 
   renderToc();
   updatePanels();
@@ -997,6 +1048,9 @@ function setViewMode(mode) {
   }
   state.viewMode = mode;
   appEl.dataset.mode = mode;
+  if (mode === 'preview') searchTarget = 'preview';
+  else if (mode === 'edit') searchTarget = 'editor';
+  else if (searchTarget === 'preview') searchTarget = 'editor';
   viewModeEl.querySelectorAll('button').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.mode === mode);
   });
@@ -1023,6 +1077,604 @@ function toast(message, type) {
   setTimeout(() => el.remove(), 3200);
 }
 
+function runSearchCommand(cmd) {
+  return Boolean(cmd(editor));
+}
+
+function stepSearch(direction) {
+  if (searchTarget === 'preview' && previewSearchPanel) {
+    if (!previewSearchPanel.isOpen()) openSearchPanelMode('search');
+    previewSearchPanel.step(direction);
+  } else {
+    runSearchCommand(direction < 0 ? findPrevious : findNext);
+  }
+}
+
+function queryFromInputs(findInput, replaceInput, optionInputs) {
+  return new SearchQuery({
+    search: findInput.value,
+    replace: replaceInput.value,
+    caseSensitive: optionInputs.caseSensitive.checked,
+    wholeWord: optionInputs.wholeWord.checked,
+    regexp: optionInputs.regexp.checked,
+  });
+}
+
+function openReplacePanelCmd() {
+  openSearchPanelMode('replace');
+  return true;
+}
+
+function openSearchPanelMode(mode) {
+  searchPanelMode = mode;
+  if (searchTarget === 'preview' && previewSearchPanel) {
+    if (searchPanelOpen(editor.state)) closeSearchPanel(editor);
+    if (previewSearchPanel.isOpen()) previewSearchPanel.setMode(mode);
+    else previewSearchPanel.open(mode);
+  } else {
+    if (previewSearchPanel) previewSearchPanel.close();
+    if (!searchPanelOpen(editor.state)) {
+      openSearchPanel(editor);
+    }
+    if (searchPanel) {
+      searchPanel.setMode(mode);
+    }
+  }
+}
+
+function closeSearchPanelCmd() {
+  if (previewSearchPanel && previewSearchPanel.isOpen()) {
+    previewSearchPanel.close();
+    return true;
+  }
+  if (!searchPanelOpen(editor.state)) return false;
+  closeSearchPanel(editor);
+  editor.focus();
+  return true;
+}
+
+class SearchReplacePanel {
+  constructor(view, mode) {
+    this.view = view;
+    this.mode = mode;
+    this.dom = document.createElement('div');
+    this.dom.className = 'search-panel';
+    this.dom.dataset.mode = mode;
+    this.build();
+    this.syncFromState();
+    this.updateCount();
+    requestAnimationFrame(() => this.focusMode(mode));
+  }
+
+  build() {
+    const dom = this.dom;
+
+    const findRow = document.createElement('div');
+    findRow.className = 'search-row';
+    findRow.appendChild(makeIcon(ICONS.Search, 'search-row-icon'));
+
+    this.findInput = document.createElement('input');
+    this.findInput.type = 'text';
+    this.findInput.className = 'search-input';
+    this.findInput.setAttribute('main-field', 'true');
+    this.findInput.placeholder = '查找';
+    this.findInput.spellcheck = false;
+    this.findInput.autocomplete = 'off';
+
+    this.countEl = document.createElement('span');
+    this.countEl.className = 'search-count';
+    this.countEl.textContent = '0/0';
+
+    const prevBtn = this.iconButton(ICONS.ChevronUp, '上一个匹配 (Shift+Enter)', () => runSearchCommand(findPrevious));
+    const nextBtn = this.iconButton(ICONS.ChevronDown, '下一个匹配 (Enter)', () => runSearchCommand(findNext));
+
+    findRow.append(this.findInput, this.countEl, prevBtn, nextBtn);
+
+    const replaceRow = document.createElement('div');
+    replaceRow.className = 'search-row replace-row';
+    replaceRow.appendChild(makeIcon(ICONS.Replace, 'search-row-icon'));
+
+    this.replaceInput = document.createElement('input');
+    this.replaceInput.type = 'text';
+    this.replaceInput.className = 'replace-input';
+    this.replaceInput.placeholder = '替换为';
+    this.replaceInput.spellcheck = false;
+    this.replaceInput.autocomplete = 'off';
+
+    const replaceBtn = document.createElement('button');
+    replaceBtn.type = 'button';
+    replaceBtn.className = 'search-btn primary';
+    replaceBtn.textContent = '替换';
+    replaceBtn.title = '替换当前匹配';
+    replaceBtn.addEventListener('click', () => this.replaceCurrent());
+
+    const replaceAllBtn = document.createElement('button');
+    replaceAllBtn.type = 'button';
+    replaceAllBtn.className = 'search-btn';
+    replaceAllBtn.textContent = '全部替换';
+    replaceAllBtn.title = '替换所有匹配';
+    replaceAllBtn.addEventListener('click', () => this.replaceAllMatches());
+
+    replaceRow.append(this.replaceInput, replaceBtn, replaceAllBtn);
+
+    const optionsRow = document.createElement('div');
+    optionsRow.className = 'search-options';
+    this.optionInputs = {};
+    const optionDefs = [
+      ['caseSensitive', '区分大小写'],
+      ['wholeWord', '完整匹配'],
+      ['regexp', '正则匹配'],
+    ];
+    for (const [key, label] of optionDefs) {
+      const labelEl = document.createElement('label');
+      labelEl.className = 'search-opt';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.opt = key;
+      this.optionInputs[key] = input;
+      input.addEventListener('change', () => this.applyQuery());
+      const text = document.createElement('span');
+      text.textContent = label;
+      labelEl.append(input, text);
+      optionsRow.appendChild(labelEl);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'search-close';
+    closeBtn.title = '关闭 (Esc)';
+    closeBtn.appendChild(makeIcon(ICONS.X));
+    closeBtn.addEventListener('click', () => this.close());
+    optionsRow.appendChild(closeBtn);
+
+    this.findInput.addEventListener('input', () => this.applyQuery());
+    this.findInput.addEventListener('keydown', (event) => this.onFieldKeydown(event));
+    this.replaceInput.addEventListener('input', () => this.applyQuery());
+    this.replaceInput.addEventListener('keydown', (event) => this.onFieldKeydown(event));
+
+    dom.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        this.close();
+      }
+    });
+
+    dom.append(findRow, replaceRow, optionsRow);
+  }
+
+  iconButton(iconNode, title, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'search-icon-btn';
+    btn.title = title;
+    btn.appendChild(makeIcon(iconNode));
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  onFieldKeydown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      runSearchCommand(event.shiftKey ? findPrevious : findNext);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this.close();
+    }
+  }
+
+  applyQuery() {
+    const query = queryFromInputs(this.findInput, this.replaceInput, this.optionInputs);
+    this.view.dispatch({ effects: setSearchQuery.of(query) });
+    this.updateCount();
+  }
+
+  replaceCurrent() {
+    this.applyQuery();
+    const query = getSearchQuery(this.view.state);
+    if (!query.valid) return;
+    if (replaceNext(this.view)) {
+      this.updateCount();
+    }
+  }
+
+  replaceAllMatches() {
+    this.applyQuery();
+    const query = getSearchQuery(this.view.state);
+    if (!query.valid) return;
+    if (!replaceAll(this.view)) {
+      toast('未找到可替换的匹配项', 'error');
+    }
+    this.updateCount();
+  }
+
+  close() {
+    closeSearchPanel(this.view);
+    this.view.focus();
+  }
+
+  setMode(mode) {
+    this.mode = mode;
+    this.dom.dataset.mode = mode;
+    requestAnimationFrame(() => this.focusMode(mode));
+  }
+
+  focusMode(mode) {
+    if (mode === 'replace') {
+      this.replaceInput.focus();
+      this.replaceInput.select();
+    } else {
+      this.findInput.focus();
+      this.findInput.select();
+    }
+  }
+
+  syncFromState() {
+    const query = getSearchQuery(this.view.state);
+    if (document.activeElement !== this.findInput) this.findInput.value = query.search;
+    if (document.activeElement !== this.replaceInput) this.replaceInput.value = query.replace;
+    this.optionInputs.caseSensitive.checked = query.caseSensitive;
+    this.optionInputs.wholeWord.checked = query.wholeWord;
+    this.optionInputs.regexp.checked = query.regexp;
+  }
+
+  updateCount() {
+    const query = getSearchQuery(this.view.state);
+    const invalidRegex = query.regexp && this.findInput.value && !query.valid;
+    this.countEl.classList.toggle('error', invalidRegex);
+    if (invalidRegex) {
+      this.countEl.textContent = '正则无效';
+      return;
+    }
+    const ranges = [];
+    if (query.valid) {
+      for (const match of query.getCursor(this.view.state)) {
+        ranges.push(match);
+      }
+    }
+    const pos = this.view.state.selection.main.from;
+    let index = -1;
+    for (let i = 0; i < ranges.length; i++) {
+      if (ranges[i].from <= pos) index = i;
+      else break;
+    }
+    this.countEl.textContent = ranges.length ? `${index + 1}/${ranges.length}` : '0/0';
+  }
+
+  update(update) {
+    const queryChanged = !getSearchQuery(update.startState).eq(getSearchQuery(update.state));
+    if (queryChanged) this.syncFromState();
+    if (queryChanged || update.docChanged || update.selectionSet || update.viewportChanged) {
+      this.updateCount();
+    }
+  }
+}
+
+class PreviewSearchPanel {
+  constructor() {
+    this.mode = 'search';
+    this.matches = [];
+    this.matchIndex = -1;
+    this.selectedMarkEl = null;
+    this.dom = document.createElement('div');
+    this.dom.className = 'search-panel preview-search-panel hidden';
+    this.dom.dataset.mode = this.mode;
+    this.build();
+    previewPaneEl.appendChild(this.dom);
+  }
+
+  build() {
+    const dom = this.dom;
+
+    const findRow = document.createElement('div');
+    findRow.className = 'search-row';
+    findRow.appendChild(makeIcon(ICONS.Search, 'search-row-icon'));
+
+    this.findInput = document.createElement('input');
+    this.findInput.type = 'text';
+    this.findInput.className = 'search-input';
+    this.findInput.setAttribute('main-field', 'true');
+    this.findInput.placeholder = '查找';
+    this.findInput.spellcheck = false;
+    this.findInput.autocomplete = 'off';
+
+    this.countEl = document.createElement('span');
+    this.countEl.className = 'search-count';
+    this.countEl.textContent = '0/0';
+
+    const prevBtn = this.iconButton(ICONS.ChevronUp, '上一个匹配 (Shift+Enter)', () => this.step(-1));
+    const nextBtn = this.iconButton(ICONS.ChevronDown, '下一个匹配 (Enter)', () => this.step(1));
+
+    findRow.append(this.findInput, this.countEl, prevBtn, nextBtn);
+
+    const replaceRow = document.createElement('div');
+    replaceRow.className = 'search-row replace-row';
+    replaceRow.appendChild(makeIcon(ICONS.Replace, 'search-row-icon'));
+
+    this.replaceInput = document.createElement('input');
+    this.replaceInput.type = 'text';
+    this.replaceInput.className = 'replace-input';
+    this.replaceInput.placeholder = '替换为';
+    this.replaceInput.spellcheck = false;
+    this.replaceInput.autocomplete = 'off';
+
+    const replaceBtn = document.createElement('button');
+    replaceBtn.type = 'button';
+    replaceBtn.className = 'search-btn primary';
+    replaceBtn.textContent = '替换';
+    replaceBtn.title = '替换当前匹配';
+    replaceBtn.addEventListener('click', () => this.replaceCurrent());
+
+    const replaceAllBtn = document.createElement('button');
+    replaceAllBtn.type = 'button';
+    replaceAllBtn.className = 'search-btn';
+    replaceAllBtn.textContent = '全部替换';
+    replaceAllBtn.title = '替换所有匹配';
+    replaceAllBtn.addEventListener('click', () => this.replaceAllMatches());
+
+    replaceRow.append(this.replaceInput, replaceBtn, replaceAllBtn);
+
+    const optionsRow = document.createElement('div');
+    optionsRow.className = 'search-options';
+    this.optionInputs = {};
+    const optionDefs = [
+      ['caseSensitive', '区分大小写'],
+      ['wholeWord', '完整匹配'],
+      ['regexp', '正则匹配'],
+    ];
+    for (const [key, label] of optionDefs) {
+      const labelEl = document.createElement('label');
+      labelEl.className = 'search-opt';
+      const input = document.createElement('input');
+      input.type = 'checkbox';
+      input.dataset.opt = key;
+      this.optionInputs[key] = input;
+      input.addEventListener('change', () => this.applyQuery());
+      const text = document.createElement('span');
+      text.textContent = label;
+      labelEl.append(input, text);
+      optionsRow.appendChild(labelEl);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.type = 'button';
+    closeBtn.className = 'search-close';
+    closeBtn.title = '关闭 (Esc)';
+    closeBtn.appendChild(makeIcon(ICONS.X));
+    closeBtn.addEventListener('click', () => this.close());
+    optionsRow.appendChild(closeBtn);
+
+    this.findInput.addEventListener('input', () => this.applyQuery());
+    this.findInput.addEventListener('keydown', (event) => this.onFieldKeydown(event));
+    this.replaceInput.addEventListener('input', () => this.applyQuery());
+    this.replaceInput.addEventListener('keydown', (event) => this.onFieldKeydown(event));
+
+    dom.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault();
+        this.close();
+      }
+    });
+
+    dom.append(findRow, replaceRow, optionsRow);
+  }
+
+  iconButton(iconNode, title, onClick) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'search-icon-btn';
+    btn.title = title;
+    btn.appendChild(makeIcon(iconNode));
+    btn.addEventListener('click', onClick);
+    return btn;
+  }
+
+  onFieldKeydown(event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      this.step(event.shiftKey ? -1 : 1);
+    } else if (event.key === 'Escape') {
+      event.preventDefault();
+      this.close();
+    }
+  }
+
+  isOpen() {
+    return !this.dom.classList.contains('hidden');
+  }
+
+  open(mode) {
+    this.dom.classList.remove('hidden');
+    previewPaneEl.classList.add('preview-searching');
+    this.setMode(mode);
+    this.syncFromState();
+    this.applyQuery();
+    requestAnimationFrame(() => this.focusMode(mode));
+  }
+
+  close() {
+    if (!this.isOpen()) return;
+    this.dom.classList.add('hidden');
+    previewPaneEl.classList.remove('preview-searching');
+    previewPaneEl.classList.remove('preview-replacing');
+    this.clearHighlights();
+    this.matches = [];
+    this.matchIndex = -1;
+    this.selectedMarkEl = null;
+  }
+
+  setMode(mode) {
+    this.mode = mode;
+    this.dom.dataset.mode = mode;
+    previewPaneEl.classList.toggle('preview-replacing', mode === 'replace');
+    if (this.isOpen()) requestAnimationFrame(() => this.focusMode(mode));
+  }
+
+  focusMode(mode) {
+    if (mode === 'replace') {
+      this.replaceInput.focus();
+      this.replaceInput.select();
+    } else {
+      this.findInput.focus();
+      this.findInput.select();
+    }
+  }
+
+  syncFromState() {
+    const query = getSearchQuery(editor.state);
+    if (document.activeElement !== this.findInput) this.findInput.value = query.search;
+    if (document.activeElement !== this.replaceInput) this.replaceInput.value = query.replace;
+    this.optionInputs.caseSensitive.checked = query.caseSensitive;
+    this.optionInputs.wholeWord.checked = query.wholeWord;
+    this.optionInputs.regexp.checked = query.regexp;
+  }
+
+  applyQuery() {
+    this.matchIndex = -1;
+    this.selectedMarkEl = null;
+    editor.dispatch({ effects: setSearchQuery.of(queryFromInputs(this.findInput, this.replaceInput, this.optionInputs)) });
+    this.refresh();
+  }
+
+  refresh() {
+    this.clearHighlights();
+    const { text, nodes } = collectPreviewText();
+    const query = getSearchQuery(editor.state);
+    const invalidRegex = this.findInput.value && query.regexp && !query.valid;
+    this.countEl.classList.toggle('error', invalidRegex);
+    if (invalidRegex) {
+      this.matches = [];
+      this.countEl.textContent = '正则无效';
+      return;
+    }
+    this.matches = [];
+    if (query.valid && text) {
+      const searchState = EditorState.create({ doc: text });
+      for (const match of query.getCursor(searchState)) {
+        this.matches.push({ from: match.from, to: match.to });
+      }
+    }
+    if (this.matchIndex >= this.matches.length) {
+      this.matchIndex = this.matches.length ? this.matches.length - 1 : -1;
+    }
+    this.renderHighlights(nodes);
+    this.updateCount();
+  }
+
+  updateCount() {
+    this.countEl.textContent = this.matches.length
+      ? `${this.matchIndex < 0 ? 0 : this.matchIndex + 1}/${this.matches.length}`
+      : '0/0';
+  }
+
+  step(direction) {
+    if (!this.matches.length) return;
+    if (this.matchIndex < 0) {
+      this.matchIndex = direction > 0 ? 0 : this.matches.length - 1;
+    } else {
+      this.matchIndex = (this.matchIndex + direction + this.matches.length) % this.matches.length;
+    }
+    this.selectedMarkEl = null;
+    this.clearHighlights();
+    const { nodes } = collectPreviewText();
+    this.renderHighlights(nodes);
+    this.updateCount();
+    if (this.selectedMarkEl) {
+      this.selectedMarkEl.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+    if (getSearchQuery(editor.state).valid) {
+      runSearchCommand(direction > 0 ? findNext : findPrevious);
+    }
+  }
+
+  replaceCurrent() {
+    this.applyQuery();
+    const query = getSearchQuery(editor.state);
+    if (!query.valid) return;
+    if (this.matchIndex < 0 && this.matches.length) this.step(1);
+    if (!replaceNext(editor)) {
+      toast('未找到可替换的匹配项', 'error');
+      return;
+    }
+    this.matchIndex = -1;
+    refreshPreviewFromEditor();
+  }
+
+  replaceAllMatches() {
+    this.applyQuery();
+    const query = getSearchQuery(editor.state);
+    if (!query.valid) return;
+    if (!replaceAll(editor)) {
+      toast('未找到可替换的匹配项', 'error');
+      return;
+    }
+    this.matchIndex = -1;
+    refreshPreviewFromEditor();
+  }
+
+  clearHighlights() {
+    previewEl.querySelectorAll('.preview-search-match').forEach((el) => {
+      const parent = el.parentNode;
+      if (!parent) return;
+      const textNode = document.createTextNode(el.textContent);
+      el.replaceWith(textNode);
+      parent.normalize();
+    });
+  }
+
+  renderHighlights(nodes) {
+    this.selectedMarkEl = null;
+    if (!this.matches.length) return;
+    const selected = this.matchIndex >= 0 ? this.matches[this.matchIndex] : null;
+    for (const { node, start } of nodes) {
+      const text = node.nodeValue;
+      const end = start + text.length;
+      const local = [];
+      for (let i = 0; i < this.matches.length; i++) {
+        const match = this.matches[i];
+        if (match.to > start && match.from < end) {
+          local.push({
+            from: Math.max(match.from, start) - start,
+            to: Math.min(match.to, end) - start,
+            selected: match === selected,
+          });
+        }
+      }
+      if (!local.length) continue;
+      local.sort((a, b) => a.from - b.from);
+      const fragment = document.createDocumentFragment();
+      let pos = 0;
+      for (const part of local) {
+        if (part.from > pos) fragment.append(document.createTextNode(text.slice(pos, part.from)));
+        const mark = document.createElement('mark');
+        mark.className = 'preview-search-match' + (part.selected ? ' selected' : '');
+        mark.textContent = text.slice(part.from, part.to);
+        if (part.selected) this.selectedMarkEl = mark;
+        fragment.append(mark);
+        pos = part.to;
+      }
+      if (pos < text.length) fragment.append(document.createTextNode(text.slice(pos)));
+      node.replaceWith(fragment);
+    }
+  }
+}
+
+function collectPreviewText() {
+  const nodes = [];
+  let text = '';
+  const walker = document.createTreeWalker(previewEl, NodeFilter.SHOW_TEXT);
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    nodes.push({ node, start: text.length });
+    text += node.nodeValue;
+  }
+  return { text, nodes };
+}
+
+function refreshPreviewFromEditor() {
+  clearTimeout(previewTimer);
+  renderMarkdown(editor.state.doc.toString(), state.currentDir);
+}
+
 function bindEvents() {
   sidebarToggleBtn.addEventListener('click', () => setSidebar(!state.sidebarOpen));
   openFolderBtn.addEventListener('click', openFolderDialog);
@@ -1032,6 +1684,12 @@ function bindEvents() {
   refreshTreeBtn.addEventListener('click', refreshTree);
   editor.scrollDOM.addEventListener('scroll', onEditorScroll, { passive: true });
   previewEl.addEventListener('scroll', onPreviewScroll, { passive: true });
+  editorHostEl.addEventListener('pointerdown', () => {
+    searchTarget = 'editor';
+  });
+  previewEl.addEventListener('pointerdown', () => {
+    searchTarget = 'preview';
+  });
 
   document.querySelectorAll('.sidebar-tabs .tab').forEach((btn) => {
     btn.addEventListener('click', () => setTab(btn.dataset.tab));
@@ -1060,6 +1718,11 @@ function bindEvents() {
 
   window.addEventListener('keydown', (event) => {
     const mod = event.ctrlKey || event.metaKey;
+    if (event.key === 'F3') {
+      event.preventDefault();
+      stepSearch(event.shiftKey ? -1 : 1);
+      return;
+    }
     if (!mod) return;
     const key = event.key.toLowerCase();
     if (key === 's' && event.shiftKey) {
@@ -1074,6 +1737,18 @@ function bindEvents() {
     } else if (key === 'o') {
       event.preventDefault();
       openFileDialog();
+    } else if (key === 'f') {
+      event.preventDefault();
+      openSearchPanelMode('search');
+    } else if (key === 'h') {
+      event.preventDefault();
+      openSearchPanelMode('replace');
+    } else if (key === 'g' && event.shiftKey) {
+      event.preventDefault();
+      stepSearch(-1);
+    } else if (key === 'g') {
+      event.preventDefault();
+      stepSearch(1);
     }
   });
 
@@ -1082,6 +1757,8 @@ function bindEvents() {
     else if (action === 'open-folder') openFolderDialog();
     else if (action === 'save') saveFile();
     else if (action === 'save-as') saveFileAs();
+    else if (action === 'find') openSearchPanelMode('search');
+    else if (action === 'replace') openSearchPanelMode('replace');
   });
 
   window.mdEditor.onFileOpen((filePath) => {
@@ -1114,6 +1791,7 @@ async function runSmokeTest(smokeFile) {
     record(Boolean(htmlTagItem) && htmlTagItem.textContent.includes('使用 标签'));
 
     setViewMode('split');
+    await new Promise((resolve) => setTimeout(resolve, 120));
     editor.scrollDOM.scrollTop = 120;
     await new Promise((resolve) => setTimeout(resolve, 180));
     record(previewEl.scrollTop > 0);
@@ -1193,6 +1871,178 @@ async function runSmokeTest(smokeFile) {
       record(fileTreeEl.querySelectorAll('.folder-root').length === 1);
     }
 
+    setActiveTab(0);
+    const selectedText = 'console';
+    const selectedStart = editor.state.doc.toString().indexOf(selectedText);
+    if (selectedStart >= 0) {
+      editor.dispatch({
+        selection: { anchor: selectedStart, head: selectedStart + selectedText.length },
+      });
+    }
+    openSearchPanelMode('search');
+    const searchPanelEl = document.querySelector('.search-panel');
+    record(Boolean(searchPanelEl));
+    if (searchPanel) {
+      const matchTotal = () => Number(searchPanel.countEl.textContent.split('/')[1] || 0);
+      record(searchPanel.findInput.value === selectedText);
+
+      searchPanel.findInput.value = '冒烟测试';
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 1);
+      record(document.querySelectorAll('.cm-searchMatch').length >= 1);
+      runSearchCommand(findNext);
+      const searchSelection = editor.state.selection.main;
+      record(editor.state.sliceDoc(searchSelection.from, searchSelection.to) === '冒烟测试');
+
+      searchPanel.findInput.value = 'MESSAGE';
+      searchPanel.optionInputs.caseSensitive.checked = true;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 0);
+      searchPanel.optionInputs.caseSensitive.checked = false;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 2);
+
+      searchPanel.findInput.value = '示例';
+      searchPanel.optionInputs.wholeWord.checked = true;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 0);
+      searchPanel.optionInputs.wholeWord.checked = false;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 1);
+
+      searchPanel.findInput.value = '^##';
+      searchPanel.optionInputs.regexp.checked = true;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 2);
+
+      searchPanel.findInput.value = '标题(二)';
+      searchPanel.replaceInput.value = '标题二-改';
+      searchPanel.optionInputs.regexp.checked = true;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 1);
+      searchPanel.replaceAllMatches();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(editor.state.doc.toString().includes('标题二-改'));
+
+      searchPanel.findInput.value = '项目';
+      searchPanel.replaceInput.value = '条目';
+      searchPanel.optionInputs.regexp.checked = false;
+      searchPanel.optionInputs.caseSensitive.checked = false;
+      searchPanel.optionInputs.wholeWord.checked = false;
+      searchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(matchTotal() === 2);
+      searchPanel.replaceAllMatches();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(editor.state.doc.toString().includes('条目一'));
+      record(!editor.state.doc.toString().includes('项目一'));
+
+      searchPanel.findInput.value = '条目一';
+      searchPanel.replaceInput.value = '项目一';
+      searchPanel.applyQuery();
+      runSearchCommand(findNext);
+      record(editor.state.sliceDoc(editor.state.selection.main.from, editor.state.selection.main.to) === '条目一');
+      searchPanel.replaceCurrent();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(editor.state.doc.toString().includes('项目一'));
+      record(!editor.state.doc.toString().includes('条目一'));
+
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'h',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(searchPanel.mode === 'replace');
+      record(searchPanelEl.dataset.mode === 'replace');
+      record(getComputedStyle(searchPanelEl.querySelector('.replace-row')).display !== 'none');
+
+      const panelClosed = closeSearchPanelCmd();
+      record(panelClosed && !searchPanelOpen(editor.state));
+
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'f',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(searchPanelOpen(editor.state));
+      record(searchPanel?.mode === 'search');
+
+      closeSearchPanelCmd();
+      setViewMode('preview');
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'f',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.isOpen());
+      record(previewPaneEl.classList.contains('preview-searching'));
+
+      previewSearchPanel.findInput.value = 'fill line \\d+';
+      previewSearchPanel.optionInputs.regexp.checked = true;
+      previewSearchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.matches.length === 60);
+      previewSearchPanel.optionInputs.regexp.checked = false;
+
+      previewSearchPanel.findInput.value = '条目二';
+      previewSearchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.matches.length === 1);
+      record(previewEl.querySelectorAll('.preview-search-match').length >= 1);
+
+      previewSearchPanel.step(1);
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.matchIndex === 0);
+      record(Boolean(previewEl.querySelector('.preview-search-match.selected')));
+
+      previewSearchPanel.replaceInput.value = '项目二';
+      previewSearchPanel.applyQuery();
+      previewSearchPanel.replaceCurrent();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      record(editor.state.doc.toString().includes('项目二'));
+      record(!editor.state.doc.toString().includes('条目二'));
+
+      previewSearchPanel.findInput.value = '项目';
+      previewSearchPanel.replaceInput.value = '条目';
+      previewSearchPanel.applyQuery();
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.matches.length === 2);
+      previewSearchPanel.replaceAllMatches();
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      record(editor.state.doc.toString().includes('条目一'));
+      record(editor.state.doc.toString().includes('条目二'));
+      record(previewEl.textContent.includes('条目二'));
+
+      window.dispatchEvent(new KeyboardEvent('keydown', {
+        key: 'h',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      record(previewSearchPanel.mode === 'replace');
+      record(previewSearchPanel.dom.dataset.mode === 'replace');
+
+      const previewClosed = closeSearchPanelCmd();
+      record(previewClosed && !previewSearchPanel.isOpen());
+      record(previewEl.querySelectorAll('.preview-search-match').length === 0);
+    } else {
+      record(false);
+    }
+
     window.mdEditor.report(results.every(Boolean) ? 'OK' : 'FAIL ' + JSON.stringify(results));
   } catch (err) {
     window.mdEditor.report('ERR ' + (err && err.message ? err.message : String(err)));
@@ -1205,6 +2055,7 @@ function pathJoin(base, ...names) {
 }
 
 async function init() {
+  previewSearchPanel = new PreviewSearchPanel();
   setTheme(state.dark);
   setSidebar(localStorage.getItem('md-sidebar') !== '0');
   setViewMode(localStorage.getItem('md-mode') || 'split');
