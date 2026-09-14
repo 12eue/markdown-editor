@@ -780,7 +780,7 @@ button {
 
 .preview-search-panel {
   position: absolute;
-  top: 8px;
+  bottom: 8px;
   left: 8px;
   right: 8px;
   z-index: 5;
@@ -791,11 +791,11 @@ button {
 }
 
 #preview-pane.preview-searching .markdown-body {
-  padding-top: 96px;
+  padding-bottom: 96px;
 }
 
 #preview-pane.preview-replacing .markdown-body {
-  padding-top: 138px;
+  padding-bottom: 138px;
 }
 
 .preview-search-match {
