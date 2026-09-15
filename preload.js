@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('mdEditor', {
   readDir: (dirPath) => ipcRenderer.invoke('fs:read-dir', dirPath),
   showContextMenu: (payload) => ipcRenderer.invoke('context-menu:show', payload),
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  getUserHome: () => ipcRenderer.invoke('app:get-home'),
   resolvePaths: (items) => ipcRenderer.invoke('fs:resolve-paths', items),
   setDirty: (dirty) => ipcRenderer.send('window:set-dirty', dirty),
   report: (payload) => ipcRenderer.send('app:report', payload),

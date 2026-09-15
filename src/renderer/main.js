@@ -537,7 +537,9 @@ function scrollToHeading(entry) {
 }
 
 function updatePanels() {
-  const hasDoc = editor.state.doc.length > 0;
+  const tab = currentTab();
+  // 未命名标签视为有效文档：不显示"打开一个 Markdown 文件"空状态，避免误认为不可编辑
+  const hasDoc = editor.state.doc.length > 0 || Boolean(tab && tab.untitled);
   editorEmptyEl.classList.toggle('hidden', hasDoc);
   previewEmptyEl.classList.toggle('hidden', previewEl.childElementCount > 0);
 }
@@ -551,7 +553,8 @@ function updateDirtyUi() {
 }
 
 function updateWindowTitle() {
-  const name = state.currentFile ? baseName(state.currentFile) : 'Markdown Editor';
+  const tab = currentTab();
+  const name = state.currentFile ? baseName(state.currentFile) : tab && tab.untitled ? tab.name : 'Markdown Editor';
   const mark = state.dirty ? '● ' : '';
   document.title = `${mark}${name} - Markdown Editor`;
 }
@@ -559,7 +562,9 @@ function updateWindowTitle() {
 function updateStatus() {
   const text = editor.state.doc.toString();
   const lines = text ? text.split('\n').length : 0;
-  statusFileEl.textContent = state.currentFile || '未打开文件';
+  const tab = currentTab();
+  const label = state.currentFile || (tab && tab.untitled ? `${tab.name}（未保存到磁盘）` : '未打开文件');
+  statusFileEl.textContent = label;
   statusFileEl.title = state.currentFile || '';
   statusMetaEl.textContent = `${lines} 行 · ${text.length} 字符`;
 }
@@ -579,7 +584,30 @@ function makeTab(filePath, content, placeholder = false) {
     eol: detectEol(content),
     dirty: false,
     placeholder,
+    untitled: false,
   };
+}
+
+function makeUntitledTab() {
+  return {
+    path: null,
+    dir: null,
+    name: '未命名',
+    savedContent: '',
+    content: '',
+    eol: '\n',
+    dirty: false,
+    placeholder: false,
+    untitled: true,
+  };
+}
+
+function createUntitledTab() {
+  state.tabs.push(makeUntitledTab());
+  activateTab(state.tabs.length - 1);
+  updatePanels();
+  // 自动聚焦编辑器，双击新建后可直接输入
+  editor.focus();
 }
 
 function activateTab(index) {
@@ -603,6 +631,7 @@ function activateTab(index) {
   switchingTabs = false;
   updateDirtyUi();
   renderMarkdown(tab.content, tab.dir);
+  updatePanels();
   highlightCurrent();
   renderTabs();
 }
@@ -624,7 +653,7 @@ function renderTabs() {
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'file-tab' + (index === state.activeTabIndex ? ' active' : '');
-    btn.title = tab.path;
+    btn.title = tab.path || '尚未保存到磁盘';
 
     const name = document.createElement('span');
     name.className = 'tab-name' + (tab.dirty ? ' dirty' : '');
@@ -640,6 +669,19 @@ function renderTabs() {
       closeTab(index);
     });
     btn.appendChild(close);
+
+    // 鼠标中键点击标签页直接关闭
+    btn.addEventListener('mousedown', (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeTab(index);
+    });
+    btn.addEventListener('auxclick', (event) => {
+      if (event.button !== 1) return;
+      event.preventDefault();
+      closeTab(index);
+    });
 
     btn.addEventListener('click', () => setActiveTab(index));
     fileTabsEl.appendChild(btn);
@@ -682,6 +724,7 @@ function closeTab(index) {
       switchingTabs = false;
       updateDirtyUi();
       renderMarkdown('', null);
+      updatePanels();
       renderTabs();
     }
   } else {
@@ -967,6 +1010,7 @@ async function saveFile() {
     toast('该文件仅支持预览，不能保存', 'error');
     return;
   }
+  if (tab.untitled) return saveFileAs();
   const text = editor.state.doc.toString();
   try {
     await window.mdEditor.writeText(tab.path, textForSave(text, tab.eol));
@@ -982,15 +1026,28 @@ async function saveFile() {
   }
 }
 
+// 未命名文件保存时的默认目录：优先使用最后打开的文件夹，否则使用用户目录
+async function getUntitledSaveDir() {
+  if (state.folderRoots.length) return state.folderRoots[state.folderRoots.length - 1];
+  return await window.mdEditor.getUserHome();
+}
+
+function joinPath(dir, name) {
+  const sep = String(dir).includes('\\') ? '\\' : '/';
+  return String(dir).replace(/[\\/]+$/, '') + sep + name;
+}
+
 async function saveFileAs() {
   const text = editor.state.doc.toString();
-  const defaultPath = currentTab() ? baseName(currentTab().path) : '未命名.md';
+  const tab = currentTab();
+  const defaultName = tab ? (tab.untitled || !tab.path ? '未命名.md' : baseName(tab.path)) : '未命名.md';
+  const defaultDir = tab && !tab.untitled && tab.dir ? tab.dir : await getUntitledSaveDir();
+  const defaultPath = defaultDir ? joinPath(defaultDir, defaultName) : defaultName;
   try {
-    const output = currentTab() ? textForSave(text, currentTab().eol) : text;
+    const output = tab ? textForSave(text, tab.eol) : text;
     const filePath = await window.mdEditor.saveFileDialog(defaultPath, output);
     if (!filePath) return;
-    if (currentTab()) {
-      const tab = currentTab();
+    if (tab) {
       tab.path = filePath;
       tab.dir = dirOf(filePath);
       tab.name = baseName(filePath);
@@ -998,6 +1055,7 @@ async function saveFileAs() {
       tab.content = text;
       tab.eol = detectEol(output);
       tab.dirty = false;
+      tab.untitled = false;
       state.currentFile = filePath;
       state.currentDir = tab.dir;
       state.dirty = false;
@@ -1689,6 +1747,12 @@ function bindEvents() {
   });
   previewEl.addEventListener('pointerdown', () => {
     searchTarget = 'preview';
+  });
+
+  // 双击标签栏空白处新建未保存的文件
+  fileTabsEl.addEventListener('dblclick', (event) => {
+    if (event.target.closest('.file-tab')) return;
+    createUntitledTab();
   });
 
   document.querySelectorAll('.sidebar-tabs .tab').forEach((btn) => {

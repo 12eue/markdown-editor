@@ -114,6 +114,8 @@ function registerIpc() {
   });
   ipcMain.handle('shell:open-external', (_event, url) => shell.openExternal(url));
 
+  ipcMain.handle('app:get-home', () => app.getPath('home'));
+
   ipcMain.handle('fs:resolve-paths', (_event, items) => {
     return items.map(({ baseDir, target }) => {
       let decoded = target;
